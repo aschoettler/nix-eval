@@ -77,6 +77,7 @@
           nixosBuild,
           snapshotSource ? null, # function cfg -> attrset to snapshot; null keeps legacy config.snapshot
           snapshotFilter ? defaultSnapshotFilter,
+          strictConfigCheck ? false,
         }:
         let
           # Only include snapshotModule for simple eval tests, not full NixOS builds
@@ -117,10 +118,36 @@
             ln -s "$nixDrv" "$out"
           '';
 
+          strictCheckDrv =
+            if !strictConfigCheck then
+              null
+            else
+              let
+                # Avoid forcing the internal module metadata; it can contain large structures (e.g. pkgs).
+                configForCheck = builtins.removeAttrs evalResult.config [
+                  "_module"
+                  "snapshot"
+                ];
+                forced = builtins.tryEval (builtins.deepSeq configForCheck true);
+              in
+              pkgs.runCommand "${name}-strict-config-check"
+                {
+                  strictSuccess = if forced.success then "1" else "0";
+                }
+                ''
+                  if [ "$strictSuccess" = "1" ]; then
+                    echo "ok" > "$out"
+                  else
+                    echo "Strict config check failed: deepSeq(config) hit an evaluation error" >&2
+                    exit 1
+                  fi
+                '';
+
           toplevel = if nixosBuild then evalResult.config.system.build.toplevel else null;
         in
         {
           check = checkDrv;
+          checkStrictConfig = strictCheckDrv;
           packages = {
             "${name}-nix" = nixDrv;
             "${name}-json" = jsonDrv;
@@ -156,6 +183,7 @@
                   nixosBuild = test.nixosBuild or false;
                   snapshotSource = test.snapshotSource or null;
                   snapshotFilter = test.snapshotFilter or defaultSnapshotFilter;
+                  strictConfigCheck = test.strictConfigCheck or false;
                 }
               ) tests;
 
@@ -176,7 +204,11 @@
               };
             in
             {
-              checks = lib.mapAttrs (_: v: v.check) results;
+              checks =
+                (lib.mapAttrs (_: v: v.check) results)
+                // (lib.mapAttrs' (n: v: lib.nameValuePair "${n}-strict-config" v.checkStrictConfig) (
+                  lib.filterAttrs (_: v: v.checkStrictConfig != null) results
+                ));
               packages = lib.foldl' (acc: v: acc // v.packages) { } (lib.attrValues results);
               apps = lib.mapAttrs (_: v: v.app) results // {
                 all = {
