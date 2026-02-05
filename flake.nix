@@ -31,7 +31,7 @@
 
       snapshotModule = {
         options.snapshot = nixpkgs.lib.mkOption {
-          type = nixpkgs.lib.types.attrs;
+          type = nixpkgs.lib.types.attrsOf nixpkgs.lib.types.anything;
           default = { };
           description = "Container for anything. You can put whatever you want here.";
         };
