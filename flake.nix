@@ -3,19 +3,22 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
-    flake-parts.url = "github:hercules-ci/flake-parts";
   };
 
   outputs =
     inputs@{
       self,
       nixpkgs,
-      flake-parts,
       ...
     }:
     let
       # helper function to read JSON
       loadJSON = path: builtins.fromJSON (builtins.readFile path);
+
+      defaultSystems = [
+        "aarch64-linux"
+        "x86_64-linux"
+      ];
 
       bootMinimal = {
         boot.loader.grub.device = "nodev";
@@ -28,7 +31,7 @@
 
       snapshotModule = {
         options.snapshot = nixpkgs.lib.mkOption {
-          type = nixpkgs.lib.types.attrsOf nixpkgs.lib.types.anything;
+          type = nixpkgs.lib.types.attrs;
           default = { };
           description = "Container for anything. You can put whatever you want here.";
         };
@@ -130,74 +133,31 @@
           };
           nixosConfiguration = if nixosBuild then evalResult else null;
         };
-
-      defaultSystems = [
-        "aarch64-linux"
-        "x86_64-linux"
-      ];
-
-      evalTestsOption = nixpkgs.lib.mkOption {
-        type = nixpkgs.lib.types.attrsOf (
-          nixpkgs.lib.types.submodule {
-            options = {
-              modules = nixpkgs.lib.mkOption {
-                type = nixpkgs.lib.types.listOf nixpkgs.lib.types.anything;
-                description = "List of modules to evaluate.";
-              };
-              outputDir = nixpkgs.lib.mkOption {
-                type = nixpkgs.lib.types.str;
-                default = ".";
-              };
-              nixosBuild = nixpkgs.lib.mkOption {
-                type = nixpkgs.lib.types.bool;
-                default = false;
-                description = "Whether to evaluate as a full NixOS system and expose the toplevel build artifact.";
-              };
-              snapshotSource = nixpkgs.lib.mkOption {
-                type = nixpkgs.lib.types.nullOr nixpkgs.lib.types.unspecified;
-                default = null;
-                description = ''
-                  Function `cfg: <attrset>` used to compute the snapshot from the evaluated config.
-                                If null, the module must set `config.snapshot` itself (legacy behavior).'';
-              };
-              snapshotFilter = nixpkgs.lib.mkOption {
-                type = nixpkgs.lib.types.functionTo nixpkgs.lib.types.attrs;
-                default = defaultSnapshotFilter;
-                description = ''
-                  Filter applied to the snapshot output to strip heavy/unprintable values.
-                                Defaults to removing functions and derivations recursively.'';
-              };
-            };
-          }
-        );
-        default = { };
-      };
-
-      flakeModule =
-        { inputs, ... }:
+      mkFlake =
         {
+          inputs,
+          tests ? { },
+          systems ? defaultSystems,
+        }:
+        let
+          lib = inputs.nixpkgs.lib;
+
           perSystem =
-            {
-              config,
-              pkgs,
-              lib,
-              ...
-            }:
+            system:
             let
+              pkgs = inputs.nixpkgs.legacyPackages.${system};
+
               results = lib.mapAttrs (
                 name: test:
                 mkEvalOutput {
-                  inherit pkgs name;
-                  inherit (test)
-                    modules
-                    outputDir
-                    nixosBuild
-                    snapshotSource
-                    snapshotFilter
-                    ;
-                  lib = inputs.nixpkgs.lib;
+                  inherit pkgs lib name;
+                  modules = test.modules;
+                  outputDir = test.outputDir or ".";
+                  nixosBuild = test.nixosBuild or false;
+                  snapshotSource = test.snapshotSource or null;
+                  snapshotFilter = test.snapshotFilter or defaultSnapshotFilter;
                 }
-              ) config.nix-eval.tests;
+              ) tests;
 
               runAll = pkgs.writeShellApplication {
                 name = "run-all";
@@ -216,87 +176,74 @@
               };
             in
             {
-              options.nix-eval.tests = evalTestsOption;
-
-              config = {
-                checks = lib.mapAttrs (n: v: v.check) results;
-                packages = lib.foldl' (acc: v: acc // v.packages) { } (lib.attrValues results);
-                apps = lib.mapAttrs (n: v: v.app) results // {
-                  all = {
-                    type = "app";
-                    program = "${runAll}/bin/run-all";
-                    meta.description = "Run all eval tests";
-                  };
-
-                  convert = {
-                    type = "app";
-                    program =
-                      toString (
-                        pkgs.writeShellApplication {
-                          name = "nix-eval-convert";
-                          runtimeInputs = [ pkgs.python3 ];
-                          text = ''
-                            set -euo pipefail
-                            python3 ${./converter/convert_config_passthru.py} "$@"
-                          '';
-                        }
-                      )
-                      + "/bin/nix-eval-convert";
-                    meta.description = "Rewrite modules' top-level config to config.snapshot.<name>";
-                  };
-
-                  convert-and-test = {
-                    type = "app";
-                    program =
-                      toString (
-                        pkgs.writeShellApplication {
-                          name = "nix-eval-convert-and-test";
-                          runtimeInputs = [
-                            pkgs.coreutils
-                            pkgs.findutils
-                            pkgs.nix
-                            pkgs.bash
-                            pkgs.python3
-                          ];
-                          text = ''
-                            set -euo pipefail
-                            mkdir -p modules modules-converted
-                            if ls modules 1>/dev/null 2>&1; then
-                              cp -r modules/* modules-converted/ 2>/dev/null || true
-                            fi
-                            nix run .#convert -- modules-converted
-                            nix flake check
-                            nix run .#all
-                          '';
-                        }
-                      )
-                      + "/bin/nix-eval-convert-and-test";
-                    meta.description = "Convert modules, flake check, then run all apps";
-                  };
+              checks = lib.mapAttrs (_: v: v.check) results;
+              packages = lib.foldl' (acc: v: acc // v.packages) { } (lib.attrValues results);
+              apps = lib.mapAttrs (_: v: v.app) results // {
+                all = {
+                  type = "app";
+                  program = "${runAll}/bin/run-all";
+                  meta.description = "Run all eval tests";
                 };
 
-                # Using legacyPackages for NixOS configurations as they are per-system here
-                legacyPackages.nixosConfigurations = lib.mapAttrs (n: v: v.nixosConfiguration) (
-                  lib.filterAttrs (n: v: v.nixosConfiguration != null) results
-                );
-              };
-            };
-        };
+                convert = {
+                  type = "app";
+                  program =
+                    toString (
+                      pkgs.writeShellApplication {
+                        name = "nix-eval-convert";
+                        runtimeInputs = [ pkgs.python3 ];
+                        text = ''
+                          set -euo pipefail
+                          python3 ${./converter/convert_config_passthru.py} "$@"
+                        '';
+                      }
+                    )
+                    + "/bin/nix-eval-convert";
+                  meta.description = "Rewrite modules' top-level config to config.snapshot.<name>";
+                };
 
-      mkFlake =
-        {
-          inputs,
-          tests ? { },
-          systems ? defaultSystems,
-        }:
-        flake-parts.lib.mkFlake { inherit inputs; } {
-          imports = [ flakeModule ];
-          inherit systems;
-          perSystem =
-            { ... }:
-            {
-              nix-eval.tests = tests;
+                convert-and-test = {
+                  type = "app";
+                  program =
+                    toString (
+                      pkgs.writeShellApplication {
+                        name = "nix-eval-convert-and-test";
+                        runtimeInputs = [
+                          pkgs.coreutils
+                          pkgs.findutils
+                          pkgs.nix
+                          pkgs.bash
+                          pkgs.python3
+                        ];
+                        text = ''
+                          set -euo pipefail
+                          mkdir -p modules modules-converted
+                          if ls modules 1>/dev/null 2>&1; then
+                            cp -r modules/* modules-converted/ 2>/dev/null || true
+                          fi
+                          nix run .#convert -- modules-converted
+                          nix flake check
+                          nix run .#all
+                        '';
+                      }
+                    )
+                    + "/bin/nix-eval-convert-and-test";
+                  meta.description = "Convert modules, flake check, then run all apps";
+                };
+              };
+
+              legacyPackages.nixosConfigurations = lib.mapAttrs (_: v: v.nixosConfiguration) (
+                lib.filterAttrs (_: v: v.nixosConfiguration != null) results
+              );
             };
+
+          perSystemResults = lib.genAttrs systems perSystem;
+        in
+        {
+          checks = lib.mapAttrs (_: v: v.checks) perSystemResults;
+          packages = lib.mapAttrs (_: v: v.packages) perSystemResults;
+          apps = lib.mapAttrs (_: v: v.apps) perSystemResults;
+          legacyPackages = lib.mapAttrs (_: v: v.legacyPackages) perSystemResults;
         };
     in
     {
@@ -304,7 +251,6 @@
         inherit
           mkEvalOutput
           snapshotModule
-          flakeModule
           loadJSON
           mkFlake
           bootMinimal
