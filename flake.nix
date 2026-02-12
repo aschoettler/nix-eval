@@ -85,10 +85,15 @@
           baseModules = [ snapshotModule ] ++ (if nixosBuild then [ bootMinimal ] else [ ]);
 
           # Mirror key NixOS module arguments in eval mode so snapshot modules can
-          # still reference `pkgs`/`lib` after conversion.
-          mergedSpecialArgs = {
-            inherit pkgs lib;
-          } // specialArgs;
+          # still reference `pkgs`/`lib` after conversion. Avoid overriding the
+          # NixOS-configured pkgs in nixosBuild mode.
+          mergedSpecialArgs =
+            if nixosBuild then
+              specialArgs
+            else
+              {
+                inherit pkgs lib;
+              } // specialArgs;
 
           evalResult =
             if nixosBuild then
