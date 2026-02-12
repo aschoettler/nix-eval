@@ -75,6 +75,7 @@
           modules,
           outputDir,
           nixosBuild,
+          specialArgs ? { },
           snapshotSource ? null, # function cfg -> attrset to snapshot; null keeps legacy config.snapshot
           snapshotFilter ? defaultSnapshotFilter,
           strictConfigCheck ? false,
@@ -83,14 +84,22 @@
           # Only include snapshotModule for simple eval tests, not full NixOS builds
           baseModules = [ snapshotModule ] ++ (if nixosBuild then [ bootMinimal ] else [ ]);
 
+          # Mirror key NixOS module arguments in eval mode so snapshot modules can
+          # still reference `pkgs`/`lib` after conversion.
+          mergedSpecialArgs = {
+            inherit pkgs lib;
+          } // specialArgs;
+
           evalResult =
             if nixosBuild then
               lib.nixosSystem {
                 inherit (pkgs) system;
+                specialArgs = mergedSpecialArgs;
                 modules = baseModules ++ modules;
               }
             else
               pkgs.lib.evalModules {
+                specialArgs = mergedSpecialArgs;
                 modules = baseModules ++ modules;
               };
 
@@ -181,6 +190,7 @@
                   modules = test.modules;
                   outputDir = test.outputDir or ".";
                   nixosBuild = test.nixosBuild or false;
+                  specialArgs = test.specialArgs or { };
                   snapshotSource = test.snapshotSource or null;
                   snapshotFilter = test.snapshotFilter or defaultSnapshotFilter;
                   strictConfigCheck = test.strictConfigCheck or false;
