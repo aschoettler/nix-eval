@@ -18,6 +18,7 @@
       defaultSystems = [
         "aarch64-linux"
         "x86_64-linux"
+        "aarch64-darwin"
       ];
 
       bootMinimal = {
@@ -93,7 +94,8 @@
             else
               {
                 inherit pkgs lib;
-              } // specialArgs;
+              }
+              // specialArgs;
 
           evalResult =
             if nixosBuild then
